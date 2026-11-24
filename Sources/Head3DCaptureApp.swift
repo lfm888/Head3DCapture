@@ -72,7 +72,7 @@ struct TrueDepthCaptureView: View {
                     Text("实时深度点云 · \(manager.livePointCount.formatted()) 点")
                         .font(.caption.bold().monospaced())
                         .foregroundColor(.cyan)
-                    Text("深度图 \(manager.depthFrameLabel) · 密度 \(manager.pointCloudDensity.title)")
+                    Text("深度图 \(manager.depthFrameLabel) · 上限 \(manager.maxPointCount.formatted()) 点 · 步长 \(manager.pointStride)")
                         .font(.caption2.monospaced())
                         .foregroundColor(.white.opacity(0.75))
                     Text("单指旋转 · 双指缩放 · 双击复位")
@@ -96,18 +96,6 @@ struct TrueDepthCaptureView: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 130)
 
-                Picker(selection: $manager.pointCloudDensity) {
-                    ForEach(PointCloudDensity.allCases) { density in
-                        Text(density.title).tag(density)
-                    }
-                } label: {
-                    Label(manager.pointCloudDensity.title, systemImage: "circle.grid.3x3")
-                        .font(.caption.bold())
-                        .foregroundColor(.white)
-                }
-                .pickerStyle(.menu)
-                .tint(.white)
-
                 Spacer(minLength: 0)
 
                 Button {
@@ -125,6 +113,28 @@ struct TrueDepthCaptureView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
+
+            // 实时可调：抽样步长 / 距离带
+            VStack(spacing: 2) {
+                sliderRow(title: "步长",
+                          valueText: "\(manager.pointStride)×\(manager.pointStride) → 1/\(manager.pointStride * manager.pointStride)",
+                          binding: strideBinding,
+                          range: 1...8,
+                          step: 1)
+                sliderRow(title: "近端",
+                          valueText: String(format: "%.2f m", manager.nearZ),
+                          binding: $manager.nearZ,
+                          range: 0.05...2.00,
+                          step: 0.05)
+                sliderRow(title: "远端",
+                          valueText: String(format: "%.2f m", manager.farZ),
+                          binding: $manager.farZ,
+                          range: 0.20...4.00,
+                          step: 0.05)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 4)
+            .background(Color.black)
 
             // 底部快门与计数栏
             HStack {
@@ -167,6 +177,30 @@ struct TrueDepthCaptureView: View {
         }
         .navigationTitle("iPhone深度数据采集模块")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var strideBinding: Binding<Double> {
+        Binding(get: { Double(manager.pointStride) },
+                set: { manager.pointStride = Int($0.rounded()) })
+    }
+
+    private func sliderRow(title: String,
+                           valueText: String,
+                           binding: Binding<Double>,
+                           range: ClosedRange<Double>,
+                           step: Double) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption2.monospaced())
+                .foregroundColor(.white.opacity(0.8))
+                .frame(width: 28, alignment: .leading)
+            Slider(value: binding, in: range, step: step)
+                .tint(.cyan)
+            Text(valueText)
+                .font(.caption2.monospaced())
+                .foregroundColor(.cyan)
+                .frame(width: 108, alignment: .trailing)
+        }
     }
 }
 
