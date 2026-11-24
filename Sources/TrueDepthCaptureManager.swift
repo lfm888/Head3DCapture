@@ -132,6 +132,13 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             ]
             videoDataOutput.setSampleBufferDelegate(self, queue: videoStreamQueue)
             session.addOutput(videoDataOutput)
+
+            // 只有打开这个开关，视频帧才会带上前置 RGB 相机的内参（iOS 11+）。
+            if let conn = videoDataOutput.connection(with: .video) {
+                if conn.isCameraIntrinsicMatrixDeliverySupported {
+                    conn.isCameraIntrinsicMatrixDeliveryEnabled = true
+                }
+            }
         }
 
         if photoOutput.isDepthDataDeliverySupported {
@@ -453,14 +460,23 @@ extension TrueDepthCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate 
         LatestVideoFrame.shared.update(pixelBuffer, intrinsics: Self.videoFrameIntrinsics(from: sampleBuffer))
     }
 
-    /// iOS 11+ 会把前置 RGB 相机的 `matrix_float3x3` 内参挂在视频帧的 sample buffer attachment 上
-    /// (`kCMSampleAttachmentKey_CameraIntrinsicMatrix`)。单位是当前视频帧像素。
+    /// iOS 11+ 会把前置 RGB 相机的 `matrix_float3x3` 内参附在视频帧的 sample buffer attachment 上
+    /// (`kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix`，需先打开
+    /// `AVCaptureConnection.isCameraIntrinsicMatrixDeliveryEnabled`)。单位是当前视频帧像素。
     nonisolated static func videoFrameIntrinsics(from sampleBuffer: CMSampleBuffer) -> simd_float3x3? {
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]],
-              let first = attachments.first,
-              let data = first[kCMSampleAttachmentKey_CameraIntrinsicMatrix] as? Data,
-              data.count >= MemoryLayout<simd_float3x3>.size else { return nil }
-        return data.withUnsafeBytes { $0.loadUnaligned(as: simd_float3x3.self) }
+        var data: Data?
+        if let attachment = CMGetAttachment(sampleBuffer,
+                                           key: kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix,
+                                           attachmentModeOut: nil) {
+            data = attachment as? Data
+        }
+        if data == nil,
+           let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]],
+           let value = attachments.first?[kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix] {
+            data = value as? Data
+        }
+        guard let matrixData = data, matrixData.count >= MemoryLayout<simd_float3x3>.size else { return nil }
+        return matrixData.withUnsafeBytes { $0.loadUnaligned(as: simd_float3x3.self) }
     }
 }
 
