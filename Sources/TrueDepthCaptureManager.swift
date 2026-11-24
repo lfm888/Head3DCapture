@@ -539,6 +539,57 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         return root
     }
 
+    /// 按距离带重写一份深度图：`[minZ, maxZ]` 之外（含 NaN/Inf）一律写 NaN，其余保留原始米值。
+    /// 输出为单通道 Float32 像素缓冲，可直接按 `CIFormat.Lf` 编成 TIFF。
+    nonisolated static func depthBuffer(_ source: CVPixelBuffer,
+                                        maskedTo minZ: Float,
+                                        bandMax maxZ: Float) -> CVPixelBuffer? {
+        let width = CVPixelBufferGetWidth(source)
+        let height = CVPixelBufferGetHeight(source)
+        guard width > 0, height > 0 else { return nil }
+
+        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [String: Any]()]
+        var destination: CVPixelBuffer?
+        var status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                         width, height,
+                                         kCVPixelFormatType_DepthFloat32,
+                                         attributes as CFDictionary,
+                                         &destination)
+        if status != kCVReturnSuccess || destination == nil {
+            status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                         width, height,
+                                         kCVPixelFormatType_OneComponent32Float,
+                                         attributes as CFDictionary,
+                                         &destination)
+        }
+        guard status == kCVReturnSuccess, let output = destination else { return nil }
+
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(output, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(output, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+
+        guard let sourceBase = CVPixelBufferGetBaseAddress(source),
+              let outputBase = CVPixelBufferGetBaseAddress(output) else { return nil }
+
+        let sourceStride = CVPixelBufferGetBytesPerRow(source) / MemoryLayout<Float32>.size
+        let outputStride = CVPixelBufferGetBytesPerRow(output) / MemoryLayout<Float32>.size
+        let sourceFloats = sourceBase.assumingMemoryBound(to: Float32.self)
+        let outputFloats = outputBase.assumingMemoryBound(to: Float32.self)
+
+        for row in 0..<height {
+            let sourceRow = sourceFloats + row * sourceStride
+            let outputRow = outputFloats + row * outputStride
+            for column in 0..<width {
+                let value = sourceRow[column]
+                outputRow[column] = (value.isFinite && value >= minZ && value <= maxZ) ? value : Float.nan
+            }
+        }
+        return output
+    }
+
     // MARK: - 额外同步目录（书签）
 
     static let outputBookmarkKey = "com.head3d.outputFolderBookmark"
@@ -620,7 +671,16 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         let depthWidth = CVPixelBufferGetWidth(depthPixelBuffer)
         let depthHeight = CVPixelBufferGetHeight(depthPixelBuffer)
 
-        let ciImage = CIImage(cvPixelBuffer: depthPixelBuffer)
+        // 把界面上「近端/远端」距离带应用到存盘数据：范围外的像素写成 NaN，
+        // 这样 depth.tiff 与下方可视化的点云严格一致（无效值 = NaN，依然单位米）。
+        let bandMin = Float(nearZ)
+        let bandMax = Float(farZ)
+        let maskedBuffer = Self.depthBuffer(depthPixelBuffer, maskedTo: bandMin, bandMax: bandMax)
+        if maskedBuffer == nil {
+            Task { @MainActor in self.statusMessage = "警告：距离带掩膜创建失败，depth.tiff 为原始深度" }
+        }
+
+        let ciImage = CIImage(cvPixelBuffer: maskedBuffer ?? depthPixelBuffer)
         guard let colorSpace = CGColorSpace(name: CGColorSpace.linearGray),
               let tiffData = ciContext.tiffRepresentation(
                 of: ciImage,
@@ -662,7 +722,12 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 "depth_height": depthHeight,
                 "depth_accuracy": convertedDepth.depthDataAccuracy == .absolute ? "absolute" : "relative",
                 "depth_quality": convertedDepth.depthDataQuality == .high ? "high" : "low",
-                "saved_folder": AppPaths.relativePath(folder: folderName)
+                "saved_folder": AppPaths.relativePath(folder: folderName),
+                // 距离带已应用到 depth.tiff：范围外像素为 NaN，范围内像素为原始米值。
+                "depth_min_m": Double(bandMin),
+                "depth_max_m": Double(bandMax),
+                "depth_band_applied": maskedBuffer != nil,
+                "depth_invalid_value": "nan"
             ]
 
             if let dims = savedRGBDimensions {
