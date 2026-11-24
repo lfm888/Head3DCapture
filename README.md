@@ -26,8 +26,6 @@ App 沙盒 `Documents/Head3D/<时间戳>/`，每次采集一个子目录，内�
 
 保存后会**回读校验**文件大小，状态栏显示 `已保存 · 640×480 · 3.42 MB`；若文件缺失/为空则显示 `保存校验失败`。
 
-**距离带会写进 `depth.tiff`**：屏幕上「近端/远端」滑杆设定范围之外的像素写成 `NaN`（范围内保留原始米值），所以保存的深度数据与下方点云完全一致；`intrinsics.json` 里同时记录 `depth_min_m` / `depth_max_m` / `depth_band_applied` / `depth_invalid_value`。
-
 > 找不到文件、或「文件」App 里目录是空的 → 见 [FAQ Q2](#q2-保存成功但文件app-里目录是空的)。
 
 ---
