@@ -23,3 +23,6 @@ xcuserdata/
 .run.log
 .logs/
 .logs.zip
+
+# CI cache dir (prebuilt xcodegen)
+.xcodegen/
