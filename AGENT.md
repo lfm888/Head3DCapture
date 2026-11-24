@@ -17,9 +17,12 @@ Saved captures are written to the app's `Documents/Head3D_<timestamp>/` folder a
 Head3DCapture/
 ├── AGENT.md
 ├── Info.plist
+├── .gitignore
 ├── .github/
 │   └── workflows/
 │       └── build-ipa.yml
+├── scripts/
+│   └── fetch-ipa.mjs        # 触发/等待 CI 并把 Head3DCapture.ipa 下载到 ./artifacts/
 └── Sources/
     ├── Head3DCaptureApp.swift
     ├── TrueDepthCaptureManager.swift
@@ -38,6 +41,7 @@ When asked to modify, inspect, or prepare this project for GitHub Actions compil
    - Keep `UIFileSharingEnabled = true` and `LSSupportsOpeningInPlace = true` in `Info.plist`.
 3. **GitHub Actions CI/CD**:
    - The workflow `.github/workflows/build-ipa.yml` runs on `macos-15`, uses `xcodegen` to generate `Head3DCapture.xcodeproj` from an inline `project.yml`, builds an unsigned `.app` (`CODE_SIGN_IDENTITY=""`, `CODE_SIGNING_REQUIRED=NO`, `CODE_SIGNING_ALLOWED=NO`), packages it into `Head3DCapture.ipa` inside `Payload/`, and uploads `Head3DCapture-IPA` as a build artifact.
+   - **Never declare an `info:` block in `project.yml`** — xcodegen would overwrite the hand-written `Info.plist` and drop `NSCameraUsageDescription` / `UIFileSharingEnabled` (camera permission crash). The workflow only sets `INFOPLIST_FILE: Info.plist` and `GENERATE_INFOPLIST_FILE: NO`, then asserts the keys with `PlistBuddy` before zipping.
    - If adding new `.swift` files under `Sources/`, `xcodegen` automatically picks them up because `sources: - path: Sources` is configured.
    - If adding new Apple system frameworks, add `- sdk: <Framework>.framework` under `targets.Head3DCapture.dependencies` in `.github/workflows/build-ipa.yml`.
 
@@ -45,11 +49,21 @@ When asked to modify, inspect, or prepare this project for GitHub Actions compil
 
 ## 4. Pushing to GitHub & Triggering Build
 1. Extract the archive into your target directory/repository.
-2. Commit and push to `main` or `master` (or trigger `workflow_dispatch` manually in GitHub Actions):
+2. Commit and push to `main` or `master`:
    ```bash
    git add .
    git commit -m "Add Head3DCapture iOS app and IPA build workflow"
-   git push origin main
+   git push origin master
    ```
-3. Wait for the **Build Unsigned iOS IPA** workflow to finish, then download the `Head3DCapture-IPA` artifact from the workflow run summary.
-4. Sideload `Head3DCapture.ipa` onto a Face ID iPhone using Sideloadly / AltStore / similar sideloading tools.
+3. **Credential requirement:** pushing a file under `.github/workflows/` needs a classic PAT with the `workflow` scope. Add it at <https://github.com/settings/tokens> (the token string stays the same, so the stored git credential keeps working). Without it the push fails with:
+   `refusing to allow a Personal Access Token to create or update workflow ... without workflow scope`.
+   SSH-key auth is not subject to that restriction.
+4. Get the IPA locally (triggers a run if needed, waits, downloads, unzips):
+   ```bash
+   node scripts/fetch-ipa.mjs            # latest run → ./artifacts/Head3DCapture-r<N>.ipa
+   node scripts/fetch-ipa.mjs --dispatch # force a fresh workflow_dispatch run first
+   ```
+   The token comes from `GITHUB_TOKEN` or the git credential manager; `repo` scope is enough.
+5. Sideload `artifacts/Head3DCapture.ipa` onto a Face ID iPhone using Sideloadly / AltStore / similar tools.
+
+> The unsigned IPA contains an `arm64` device build without a signature; it only installs after you sign it (Sideloadly / AltStore / personal developer certificate).
