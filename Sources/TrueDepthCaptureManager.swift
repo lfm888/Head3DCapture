@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreImage
 import ImageIO
+import simd
 import SwiftUI
 import UIKit
 
@@ -12,10 +13,12 @@ final class LatestVideoFrame {
 
     private let lock = NSLock()
     private var buffer: CVPixelBuffer?
+    private var intrinsics: simd_float3x3?
 
-    func update(_ pixelBuffer: CVPixelBuffer) {
+    func update(_ pixelBuffer: CVPixelBuffer, intrinsics newIntrinsics: simd_float3x3?) {
         lock.lock()
         buffer = pixelBuffer
+        if let newIntrinsics { intrinsics = newIntrinsics }
         lock.unlock()
     }
 
@@ -25,9 +28,18 @@ final class LatestVideoFrame {
         return buffer
     }
 
+    /// 前置 RGB 相机内参（由 `kCMSampleAttachmentKey_CameraIntrinsicMatrix` 提供，单位为
+    /// 当前视频帧像素，即 `color_sampling_width x color_sampling_height`）。
+    func peekIntrinsics() -> simd_float3x3? {
+        lock.lock()
+        defer { lock.unlock() }
+        return intrinsics
+    }
+
     func clear() {
         lock.lock()
         buffer = nil
+        intrinsics = nil
         lock.unlock()
     }
 }
@@ -357,6 +369,18 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 intrinsicsDict["color_sampling_width"] = CVPixelBufferGetWidth(frame)
                 intrinsicsDict["color_sampling_height"] = CVPixelBufferGetHeight(frame)
             }
+            // 前置 RGB 相机内参（iOS 通过视频帧 attachment 提供，无对应外参 API）。
+            if let rgbK = LatestVideoFrame.shared.peekIntrinsics() {
+                intrinsicsDict["rgb_fx"] = rgbK.columns.0.x
+                intrinsicsDict["rgb_fy"] = rgbK.columns.1.y
+                intrinsicsDict["rgb_cx"] = rgbK.columns.2.x
+                intrinsicsDict["rgb_cy"] = rgbK.columns.2.y
+                intrinsicsDict["rgb_intrinsics_3x3"] = [
+                    [rgbK.columns.0.x, rgbK.columns.1.x, rgbK.columns.2.x],
+                    [rgbK.columns.0.y, rgbK.columns.1.y, rgbK.columns.2.y],
+                    [rgbK.columns.0.z, rgbK.columns.1.z, rgbK.columns.2.z]
+                ]
+            }
             intrinsicsDict["point_cloud_rotation_deg"] = Double(TrueDepthCaptureManager.pointCloudRotationDegrees)
 
             if let calib = convertedDepth.cameraCalibrationData {
@@ -426,7 +450,17 @@ extension TrueDepthCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate 
                                    didOutput sampleBuffer: CMSampleBuffer,
                                    from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        LatestVideoFrame.shared.update(pixelBuffer)
+        LatestVideoFrame.shared.update(pixelBuffer, intrinsics: Self.videoFrameIntrinsics(from: sampleBuffer))
+    }
+
+    /// iOS 11+ 会把前置 RGB 相机的 `matrix_float3x3` 内参挂在视频帧的 sample buffer attachment 上
+    /// (`kCMSampleAttachmentKey_CameraIntrinsicMatrix`)。单位是当前视频帧像素。
+    nonisolated static func videoFrameIntrinsics(from sampleBuffer: CMSampleBuffer) -> simd_float3x3? {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]],
+              let first = attachments.first,
+              let data = first[kCMSampleAttachmentKey_CameraIntrinsicMatrix] as? Data,
+              data.count >= MemoryLayout<simd_float3x3>.size else { return nil }
+        return data.withUnsafeBytes { $0.loadUnaligned(as: simd_float3x3.self) }
     }
 }
 
