@@ -1,0 +1,19 @@
+# Build / CI output
+artifacts/
+build/
+DerivedData/
+Payload/
+*.ipa
+*.xcarchive
+
+# Generated Xcode project (xcodegen produces it on CI)
+*.xcodeproj/
+*.xcworkspace/
+project.yml
+
+# macOS / editors
+.DS_Store
+xcuserdata/
+*.xcuserstate
+.idea/
+.vscode/
