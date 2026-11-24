@@ -38,6 +38,74 @@ App 沙盒 `Documents/Head3D/<时间戳>/`，每次采集一个子目录，内�
 
 ---
 
+## 4. 数据集格式（下游项目必读）
+
+### 目录结构
+```
+Documents/Head3D/<时间戳>/
+├── rgb.jpg          前置 RGB（全分辨率）
+├── depth.tiff       深度（米，float32，无效=NaN）
+└── intrinsics.json  内参/外参/尺寸元数据
+```
+
+### `depth.tiff`
+
+| 属性 | 值 |
+|---|---|
+| 尺寸 | 深度图原尺寸（Face ID 机型通常 **640×480**，传感器横向朝向） |
+| 类型 | 单通道 IEEE float32（OpenCV `CV_32FC1`），单位 **米** |
+| 编码 | TIFF `CIFormat.Lf` + `linearGray`，无压缩 |
+| 有效值 | `np.isfinite(d) & (d > 0)`；其余为 `NaN`（传感器空洞） |
+| **是否按 UI 距离带裁剪** | **否**。`depth.tiff` 永远是**全量有效深度** |
+| **可视化-only 参数（不写进数据）** | 「近端/远端」距离带、抽样步长、顺时针 90° 旋转、左右镜像 |
+
+> 也就是说：屏幕上的点云是「按距离带+步长抽样+旋转+镜像」后的**视图**；磁盘上的 `depth.tiff` 始终是原始的、未裁剪、未旋转的米制深度图。需要裁剪就在下游自己做（见 FAQ Q5）。
+
+### `rgb.jpg`
+- `AVCapturePhotoOutput` 全分辨率 JPEG（如 3024×4032），**可能带 EXIF Orientation**。读取时用 `PIL.ImageOps.exif_transpose(img)` 或 OpenCV `IMREAD_IGNORE_ORIENTATION`，否则与深度方向不一致。
+- 深度已由系统配准到这台 RGB 相机的视线（见 FAQ Q1），所以同一像素 `(u,v)` 归一化后一一对应；但两者**分辨率/长宽比不同**，换算按宽度比 + 垂直居中。
+- 若要把 RGB 叠加到深度分辨率：`scale = rgbW/depthW`，`rv = (v - depthH/2)*scale + rgbH/2`。
+
+### `intrinsics.json` 字段
+
+| key | 含义 |
+|---|---|
+| `depth_width` / `depth_height` | 深度图尺寸（与 `depth.tiff` 一致） |
+| `depth_accuracy` / `depth_quality` | 深度精度（absolute/relative）/质量 |
+| `fx` `fy` `cx` `cy` | **已缩放到深度图分辨率**的深度内参 |
+| `reference_width` / `reference_height` | `K` 的原始标定分辨率（RGB 参考尺寸）；需要原始量级时 `fx * refW / depthW` 反推 |
+| `pixel_size_mm` | 传感器像素尺寸 |
+| `extrinsic_depth_to_rgb_3x4` | 深度→RGB 的 `[R\|t]`（行主序），TrueDepth 下为**单位阵** |
+| `rgb_width` / `rgb_height` | `rgb.jpg` 实际像素尺寸 |
+| `rgb_fx` `rgb_fy` `rgb_cx` `rgb_cy` `rgb_intrinsics_3x3` | 前置 RGB 相机内参（来自视频帧 attachment，单位为 `color_sampling_width×height` 的像素） |
+| `color_sampling_width` / `color_sampling_height` | 彩色上色时采样的实时 RGB 流分辨率（≠ `rgb.jpg`） |
+| `point_cloud_rotation_deg` | **仅**可视化用的旋转角（数据未旋转） |
+| `saved_folder` | 相对 `Documents` 的目录名，如 `Head3D/20261124_190814_455` |
+
+> 字段策略：只**追加**、不改名、不删；下游按 key 读取、忽略未知 key。
+
+### 反投影（Python / OpenCV 示例）
+
+```python
+import json, numpy as np, cv2
+
+d = cv2.imread("depth.tiff", cv2.IMREAD_UNCHANGED).astype(np.float32)   # HxW, 米
+meta = json.load(open("intrinsics.json"))
+fx, fy, cx, cy = meta["fx"], meta["fy"], meta["cx"], meta["cy"]
+
+valid = np.isfinite(d) & (d > 0)
+v, u = np.nonzero(valid)                 # 图像坐标（u 右, v 下）
+z = d[v, u]
+x = (u - cx) * z / fx
+y = (v - cy) * z / fy                    # 图像坐标 v 向下；想“y 向上”取 -y
+
+# 若需要按 UI 那样的距离带，自己裁：
+near, far = 0.25, 0.90
+d[(d < near) | (d > far)] = np.nan
+```
+
+---
+
 ## FAQ
 
 ### Q1: RGB 相机与深度之间没有标定外参，为什么彩色点云能直接映射上色？
@@ -97,3 +165,25 @@ App 沙盒 `Documents/Head3D/<时间戳>/`，每次采集一个子目录，内�
 | 左右与预览不一致 | `PointCloudSettings.mirrorHorizontally`（默认 `true`，试 `false`） |
 | 旋转时画面“漂”而不是绕人转 | 检查渲染器是否仍用 `T(-centroid)` 作支点（`PointCloudRenderer.draw`） |
 | 点云太大/太小 | `PointCloudRenderer.distance` 默认值（现为 `0.65`） |
+
+---
+
+### Q5: `depth.tiff` 里有大量 `NaN` / 有效像素很少，是被距离带裁掉了吗？
+
+**不是。** 设备端**从不对** `depth.tiff` 做距离带裁剪（见 §4「数据集格式」），滑杆只影响屏幕上的点云。
+
+`NaN` 全部来自深度本身：TrueDepth 在贴得太近（≲0.2 m）、太远（≳1.5 m 明显变差）、反光/纯黑吸光面、无纹理区域都会输出无效值。先量一下：
+
+```python
+import cv2, numpy as np
+d = cv2.imread("depth.tiff", cv2.IMREAD_UNCHANGED)
+print(d.dtype, d.shape, "NaN占比", np.isnan(d).mean())
+print("有效值域", np.nanmin(d), np.nanmax(d))
+```
+
+- `NaN` 占比很高但 `nanmin/nanmax` 是合理的米制数值 → 拍的时候太近/太远或表面不配合，重拍即可。
+- 如果你**希望**下游拿到的就是裁剪过的数据，请在自己的预处理里做（别指望设备端）：
+  ```python
+  d[(d < near) | (d > far)] = np.nan
+  ```
+- 屏幕上显示的点数 = `有效像素 ÷ 步长²`，所以「步长 3 + 距离带较窄」时点数自然只有几千，与 `depth.tiff` 的完整度无关。
