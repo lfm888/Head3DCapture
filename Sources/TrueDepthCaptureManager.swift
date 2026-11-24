@@ -118,7 +118,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             videoDataOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
             ]
-            videoDataOutput.setSampleBufferDelegate(self, callbackQueue: videoStreamQueue)
+            videoDataOutput.setSampleBufferDelegate(self, queue: videoStreamQueue)
             session.addOutput(videoDataOutput)
         }
 

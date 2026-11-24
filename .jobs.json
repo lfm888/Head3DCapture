@@ -1,0 +1,121 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 138178645882,
+      "run_id": 45314711061,
+      "workflow_name": "Build Unsigned iOS IPA",
+      "head_branch": "master",
+      "run_url": "https://api.github.com/repos/lfm888/Head3DCapture/actions/runs/45314711061",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOV5cYe88AAAAgLBbPeg",
+      "head_sha": "4097ca2b36f507024f29c48faefd05dab30f928c",
+      "url": "https://api.github.com/repos/lfm888/Head3DCapture/actions/jobs/138178645882",
+      "html_url": "https://github.com/lfm888/Head3DCapture/actions/runs/45314711061/job/138178645882",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-11-24T02:45:36Z",
+      "started_at": "2026-11-24T02:45:38Z",
+      "completed_at": "2026-11-24T02:46:35Z",
+      "name": "build",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-24T02:45:38Z",
+          "completed_at": "2026-11-24T02:45:39Z"
+        },
+        {
+          "name": "Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-24T02:45:39Z",
+          "completed_at": "2026-11-24T02:45:40Z"
+        },
+        {
+          "name": "Show toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-24T02:45:40Z",
+          "completed_at": "2026-11-24T02:45:41Z"
+        },
+        {
+          "name": "Install XcodeGen",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-24T02:45:41Z",
+          "completed_at": "2026-11-24T02:45:48Z"
+        },
+        {
+          "name": "Generate Xcode Project",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-24T02:45:48Z",
+          "completed_at": "2026-11-24T02:45:48Z"
+        },
+        {
+          "name": "Build .app (Unsigned)",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 6,
+          "started_at": "2026-11-24T02:45:48Z",
+          "completed_at": "2026-11-24T02:46:28Z"
+        },
+        {
+          "name": "Upload build log on failure",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-24T02:46:28Z",
+          "completed_at": "2026-11-24T02:46:30Z"
+        },
+        {
+          "name": "Package into IPA",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": "2026-11-24T02:46:30Z",
+          "completed_at": "2026-11-24T02:46:30Z"
+        },
+        {
+          "name": "Upload IPA Artifact",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9,
+          "started_at": "2026-11-24T02:46:30Z",
+          "completed_at": "2026-11-24T02:46:30Z"
+        },
+        {
+          "name": "Post Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-11-24T02:46:30Z",
+          "completed_at": "2026-11-24T02:46:31Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-11-24T02:46:31Z",
+          "completed_at": "2026-11-24T02:46:33Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/lfm888/Head3DCapture/check-runs/138178645882",
+      "labels": [
+        "macos-15"
+      ],
+      "runner_id": 1000000035,
+      "runner_name": "GitHub Actions 1000000035",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}
