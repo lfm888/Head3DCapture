@@ -723,13 +723,10 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         // 这样 depth.tiff 与下方可视化的点云严格一致（无效值 = NaN，依然单位米）。
         let bandMin = Float(nearZ)
         let bandMax = Float(farZ)
-        // 先量原始深度，再量裁剪后的，方便区分“本来就很稀”和“被距离带裁掉了”。
-        let rawStats = Self.depthStatistics(depthPixelBuffer)
         let maskedBuffer = Self.depthBuffer(depthPixelBuffer, maskedTo: bandMin, bandMax: bandMax)
         if maskedBuffer == nil {
             Task { @MainActor in self.statusMessage = "警告：距离带掩膜创建失败，depth.tiff 为原始深度" }
         }
-        let savedStats = maskedBuffer.map { Self.depthStatistics($0) } ?? rawStats
 
         let ciImage = CIImage(cvPixelBuffer: maskedBuffer ?? depthPixelBuffer)
         guard let colorSpace = CGColorSpace(name: CGColorSpace.linearGray),
