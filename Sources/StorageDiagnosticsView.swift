@@ -18,8 +18,20 @@ struct StorageDiagnosticsView: View {
                     ForEach(flags, id: \.self) { key in
                         infoRow(key)
                     }
-                    LabeledContent("Bundle ID", value: Bundle.main.bundleIdentifier ?? "-")
-                    LabeledContent("显示名", value: AppPaths.appDisplayName)
+                    HStack {
+                        Text("Bundle ID").font(.caption.monospaced())
+                        Spacer()
+                        Text(Bundle.main.bundleIdentifier ?? "-")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("显示名").font(.caption.monospaced())
+                        Spacer()
+                        Text(AppPaths.appDisplayName)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("沙盒里的真实路径") {

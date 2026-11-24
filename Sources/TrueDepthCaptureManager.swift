@@ -523,7 +523,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
 
     /// 让用户挑一个普通文件夹（iCloud Drive / 我的 iPhone 任意位置），以后每次保存自动同步一份。
     func chooseOutputFolder() {
-        let picker = UIDocumentPickerViewController(forOpeningContentProviders: [.folder], asCopy: false)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.folder], asCopy: false)
         picker.allowsMultipleSelection = false
         let delegate = FolderPickerDelegate { [weak self] url in
             Task { @MainActor in self?.storeOutputFolder(url) }
