@@ -69,9 +69,12 @@ struct TrueDepthCaptureView: View {
                 PointCloudMetalView(renderer: manager.pointCloudRenderer)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("实时深度点云 · \(manager.livePointCount) 点")
+                    Text("实时深度点云 · \(manager.livePointCount.formatted()) 点")
                         .font(.caption.bold().monospaced())
                         .foregroundColor(.cyan)
+                    Text("深度图 \(manager.depthFrameLabel) · 密度 \(manager.pointCloudDensity.title)")
+                        .font(.caption2.monospaced())
+                        .foregroundColor(.white.opacity(0.75))
                     Text("单指旋转 · 双指缩放 · 双击复位")
                         .font(.caption2)
                         .foregroundColor(.white.opacity(0.75))
@@ -84,13 +87,28 @@ struct TrueDepthCaptureView: View {
             }
             .frame(maxHeight: .infinity)
 
-            // 显示模式：彩色深度点云 / 深度伪彩
-            HStack(spacing: 10) {
-                Picker("显示模式", selection: $manager.showColorPointCloud) {
-                    Text("彩色深度点云").tag(true)
-                    Text("深度伪彩").tag(false)
+            // 显示模式：彩色深度点云 / 深度伪彩 + 点云稠密度
+            HStack(spacing: 8) {
+                Picker("显示", selection: $manager.showColorPointCloud) {
+                    Text("彩色").tag(true)
+                    Text("伪彩").tag(false)
                 }
                 .pickerStyle(.segmented)
+                .frame(maxWidth: 130)
+
+                Picker(selection: $manager.pointCloudDensity) {
+                    ForEach(PointCloudDensity.allCases) { density in
+                        Text(density.title).tag(density)
+                    }
+                } label: {
+                    Label(manager.pointCloudDensity.title, systemImage: "circle.grid.3x3")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                }
+                .pickerStyle(.menu)
+                .tint(.white)
+
+                Spacer(minLength: 0)
 
                 Button {
                     if let url = manager.lastCaptureURL { FileExporter.export([url]) }

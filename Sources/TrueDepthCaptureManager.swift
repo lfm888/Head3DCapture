@@ -44,6 +44,78 @@ final class LatestVideoFrame {
     }
 }
 
+/// 点云采样稠密度。TrueDepth 输出的是一张致密深度图（通常 640×480 = 30.7 万像素），
+/// `stride` 就是每隔多少个像素取一个点：1 = 全部像素，2 = 1/4，4 = 1/16。
+enum PointCloudDensity: Int, CaseIterable, Identifiable {
+    case full = 1
+    case medium = 2
+    case low = 4
+
+    var id: Int { rawValue }
+    var stride: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .full: return "满(逐像素)"
+        case .medium: return "中(1/4)"
+        case .low: return "低(1/16)"
+        }
+    }
+}
+
+/// 与可视化相关的常量（不参与保存的数据契约）。
+enum PointCloudSettings {
+    /// TrueDepth 深度图是横向(landscape)输出的，顺时针转 90° 与竖屏预览一致。
+    static let rotationDegrees: Float = 90
+    /// 只保留该距离范围内的像素（单位：米）。放得比 1.2m 宽可以看到更多背景点。
+    static let minZ: Float = 0.10
+    static let maxZ: Float = 1.50
+    /// 点云重建频率上限（帧/秒），避免满密度时把 CPU 打满。
+    static let maxRebuildHz: Double = 15
+}
+
+/// 深度回调所在的非主线程需要读到的配置副本（由 UI 的 @Published 值同步过来）。
+final class PointCloudConfig {
+    static let shared = PointCloudConfig()
+
+    private let lock = NSLock()
+    private var stride: Int = PointCloudDensity.full.stride
+    private var useColor: Bool = true
+
+    func update(stride newStride: Int, useColor newUseColor: Bool) {
+        lock.lock()
+        stride = max(1, newStride)
+        useColor = newUseColor
+        lock.unlock()
+    }
+
+    func current() -> (stride: Int, useColor: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (stride, useColor)
+    }
+}
+
+/// 限制点云重建频率。
+final class PointCloudThrottle {
+    static let shared = PointCloudThrottle()
+
+    private let lock = NSLock()
+    private var lastTime: CFTimeInterval = 0
+
+    func allow(hz: Double) -> Bool {
+        let interval = hz > 0 ? 1.0 / hz : 0
+        lock.lock()
+        defer { lock.unlock() }
+        let now = CACurrentMediaTime()
+        if now - lastTime >= interval {
+            lastTime = now
+            return true
+        }
+        return false
+    }
+}
+
 @MainActor
 class TrueDepthCaptureManager: NSObject, ObservableObject {
     @Published var isSessionRunning = false
@@ -53,14 +125,26 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
     @Published var captureCount = 0
     @Published var livePointCount = 0
     /// true = 彩色深度点云（用前置 RGB 给每个深度点上色）；false = 深度伪彩。
-    @Published var showColorPointCloud = true
+    @Published var showColorPointCloud = true {
+        didSet { syncPointCloudConfig() }
+    }
+    /// 点云稠密度（逐像素 / 1/4 / 1/16）。
+    @Published var pointCloudDensity: PointCloudDensity = .full {
+        didSet { syncPointCloudConfig() }
+    }
+    /// 当前深度图分辨率，显示在 UI 上方便排查点数为何变少。
+    @Published var depthFrameLabel = "--"
+
+    private func syncPointCloudConfig() {
+        PointCloudConfig.shared.update(stride: pointCloudDensity.stride, useColor: showColorPointCloud)
+    }
 
     let session = AVCaptureSession()
     let pointCloudRenderer = PointCloudRenderer()
 
     /// 点云可视化相对传感器原始朝向的旋转。TrueDepth 深度图是横向(landscape)输出的，
     /// 顺时针转 90° 后与竖屏预览画面一致。数据文件不做旋转（保持传感器原始朝向）。
-    static let pointCloudRotationDegrees: Float = 90
+    static let pointCloudRotationDegrees: Float = PointCloudSettings.rotationDegrees
 
     private let sessionQueue = DispatchQueue(label: "com.head3d.capture.session")
     private let depthStreamQueue = DispatchQueue(label: "com.head3d.depth.stream")
@@ -72,6 +156,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        syncPointCloudConfig()
         checkPermissionsAndConfigure()
     }
 
@@ -191,7 +276,8 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
 
     // MARK: - Point cloud
 
-    private func buildPointCloud(from depthData: AVDepthData, strideStep: Int = 3, useColor: Bool) -> [PointVertex] {
+    /// 在深度回调线程上直接构建，避免主线程卡顿。
+    nonisolated static func makePointCloud(from depthData: AVDepthData, strideStep: Int, useColor: Bool) -> [PointVertex] {
         let floatDepthData = depthData.depthDataType == kCVPixelFormatType_DepthFloat32
             ? depthData
             : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
@@ -238,8 +324,8 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         let halfRgbHeight = Float(rgbH) * 0.5
         let canSampleColor = rgbBase != nil && rgbW > 0 && rgbH > 0
 
-        // Clockwise rotation of the visualization (see pointCloudRotationDegrees).
-        let theta = TrueDepthCaptureManager.pointCloudRotationDegrees * Float.pi / 180.0
+        // Clockwise rotation of the visualization (see PointCloudSettings.rotationDegrees).
+        let theta = PointCloudSettings.rotationDegrees * Float.pi / 180.0
         let cosT = cos(theta)
         let sinT = sin(theta)
         // Screen coords: x right, y up. Clockwise by θ: (x, y) -> (x·cosθ + y·sinθ, -x·sinθ + y·cosθ).
@@ -248,8 +334,8 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         var vertices: [PointVertex] = []
         vertices.reserveCapacity((width / strideStep) * (height / strideStep))
 
-        let minZ: Float = 0.15
-        let maxZ: Float = 1.20
+        let minZ = PointCloudSettings.minZ
+        let maxZ = PointCloudSettings.maxZ
 
         var v = 0
         while v < height {
@@ -264,7 +350,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                     let px = x * rotA + y * rotB
                     let py = x * rotC + y * rotD
 
-                    var color = depthPseudoColor(t: max(0.0, min(1.0, (z - minZ) / (maxZ - minZ))))
+                    var color = Self.depthPseudoColor(t: max(0.0, min(1.0, (z - minZ) / (maxZ - minZ))))
                     if canSampleColor, let rgbBase {
                         let ru = Int(Float(u) * colorScale)
                         let rv = Int((Float(v) - halfHeight) * colorScale + halfRgbHeight)
@@ -290,7 +376,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         return vertices
     }
 
-    private func depthPseudoColor(t: Float) -> SIMD4<Float> {
+    nonisolated static func depthPseudoColor(t: Float) -> SIMD4<Float> {
         let r = max(0.0, min(1.0, 1.5 - abs(4.0 * t - 3.0)))
         let g = max(0.0, min(1.0, 1.5 - abs(4.0 * t - 2.0)))
         let b = max(0.0, min(1.0, 1.5 - abs(4.0 * t - 1.0)))
@@ -442,12 +528,21 @@ extension TrueDepthCaptureManager: AVCaptureDepthDataOutputDelegate {
                                      didOutput depthData: AVDepthData,
                                      timestamp: CMTime,
                                      connection: AVCaptureConnection) {
+        guard PointCloudThrottle.shared.allow(hz: PointCloudSettings.maxRebuildHz) else { return }
+
+        let config = PointCloudConfig.shared.current()
+        let pts = TrueDepthCaptureManager.makePointCloud(from: depthData,
+                                                         strideStep: config.stride,
+                                                         useColor: config.useColor)
+
+        let width = CVPixelBufferGetWidth(depthData.depthDataMap)
+        let height = CVPixelBufferGetHeight(depthData.depthDataMap)
+        let label = "\(width)×\(height)"
+
         Task { @MainActor in
-            let pts = self.buildPointCloud(from: depthData,
-                                           strideStep: 3,
-                                           useColor: self.showColorPointCloud)
             self.pointCloudRenderer.updatePoints(pts)
             self.livePointCount = pts.count
+            if self.depthFrameLabel != label { self.depthFrameLabel = label }
         }
     }
 }
