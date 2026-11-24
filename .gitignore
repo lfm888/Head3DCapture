@@ -17,3 +17,9 @@ xcuserdata/
 *.xcuserstate
 .idea/
 .vscode/
+
+# local CI diagnostics
+.jobs.json
+.run.log
+.logs/
+.logs.zip
