@@ -21,6 +21,8 @@ class PointCloudRenderer: NSObject, MTKViewDelegate {
     var yaw: Float = 0.0
     var pitch: Float = 0.0
     var distance: Float = 0.65
+    /// 当前点云的质心（模型坐标），用作旋转支点，否则旋转会绕着相机中心“公转”，很不顺手。
+    private(set) var centroid = SIMD3<Float>(0, 0, -0.4)
 
     private let metalShaderSource = """
     #include <metal_stdlib>
@@ -105,9 +107,11 @@ class PointCloudRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    func updatePoints(_ points: [PointVertex]) {
+    func updatePoints(_ points: [PointVertex], centroid: SIMD3<Float>) {
         bufferLock.lock()
         defer { bufferLock.unlock() }
+
+        self.centroid = centroid
 
         guard !points.isEmpty else {
             vertexCount = 0
@@ -136,6 +140,7 @@ class PointCloudRenderer: NSObject, MTKViewDelegate {
         bufferLock.lock()
         let count = vertexCount
         let buf = vertexBuffer
+        let pivot = centroid
         bufferLock.unlock()
 
         guard let cmdBuf = commandQueue.makeCommandBuffer(),
@@ -149,14 +154,13 @@ class PointCloudRenderer: NSObject, MTKViewDelegate {
         let aspect = Float(view.drawableSize.width / max(view.drawableSize.height, 1.0))
         let proj = perspectiveMatrix(fovY: Float.pi / 3.0, aspect: aspect, near: 0.05, far: 5.0)
 
-        let centerZ: Float = 0.45
+        // 绕「点云质心」旋转，再把质心摆到相机前 distance 处。
         let rotY = rotationYMatrix(yaw)
         let rotX = rotationXMatrix(pitch)
-        let toOrigin = translationMatrix(0, 0, -centerZ)
-        let fromOrigin = translationMatrix(0, 0, centerZ)
+        let toPivot = translationMatrix(-pivot.x, -pivot.y, -pivot.z)
         let cameraOffset = translationMatrix(0, 0, -distance)
 
-        let modelView = cameraOffset * fromOrigin * rotY * rotX * toOrigin
+        let modelView = cameraOffset * rotY * rotX * toPivot
         let mvp = proj * modelView
 
         struct Uniforms {

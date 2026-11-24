@@ -49,6 +49,8 @@ final class LatestVideoFrame {
 enum PointCloudSettings {
     /// TrueDepth 深度图是横向(landscape)输出的，顺时针转 90° 与竖屏预览一致。
     static let rotationDegrees: Float = 90
+    /// 上方预览是前置相机的镜像画面，点云也做左右镜像才“看上去”一致（仅显示，不影响保存）。
+    static let mirrorHorizontally = true
     /// 距离带 / 步长默认值与可调范围（UI 可在运行时拖动）。
     static let defaultMinZ: Double = 0.10
     static let defaultMaxZ: Double = 1.50
@@ -167,6 +169,14 @@ enum FilePresenter {
     static func present(_ viewController: UIViewController) {
         topViewController()?.present(viewController, animated: true)
     }
+}
+
+/** 一帧点云 + 其质心（供渲染器做旋转支点）。 */
+struct PointCloudFrame {
+    var vertices: [PointVertex]
+    var centroid: SIMD3<Float>
+
+    static let empty = PointCloudFrame(vertices: [], centroid: SIMD3<Float>(0, 0, -0.4))
 }
 
 /// 限制点云重建频率。
@@ -398,7 +408,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                                           strideStep: Int,
                                           useColor: Bool,
                                           minZ: Float,
-                                          maxZ: Float) -> [PointVertex] {
+                                          maxZ: Float) -> PointCloudFrame {
         let floatDepthData = depthData.depthDataType == kCVPixelFormatType_DepthFloat32
             ? depthData
             : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
@@ -410,7 +420,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return [] }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return PointCloudFrame.empty }
 
         var fx: Float = Float(width) * 0.8
         var fy: Float = Float(width) * 0.8
@@ -452,8 +462,14 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         // Screen coords: x right, y up. Clockwise by θ: (x, y) -> (x·cosθ + y·sinθ, -x·sinθ + y·cosθ).
         let rotA = cosT, rotB = sinT, rotC = -sinT, rotD = cosT
 
+        let mirrorSign: Float = PointCloudSettings.mirrorHorizontally ? -1.0 : 1.0
+
         var vertices: [PointVertex] = []
         vertices.reserveCapacity((width / max(1, strideStep)) * (height / max(1, strideStep)))
+
+        var sumX: Double = 0
+        var sumY: Double = 0
+        var sumZ: Double = 0
 
         var v = 0
         while v < height {
@@ -465,7 +481,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                     let x = (Float(u) - cx) * z / fx
                     let y = -((Float(v) - cy) * z / fy)
 
-                    let px = x * rotA + y * rotB
+                    let px = (x * rotA + y * rotB) * mirrorSign
                     let py = x * rotC + y * rotD
 
                     var color = Self.depthPseudoColor(t: max(0.0, min(1.0, (z - minZ) / (maxZ - minZ))))
@@ -485,13 +501,22 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                     }
 
                     vertices.append(PointVertex(position: SIMD3<Float>(px, py, -z), color: color))
+                    sumX += Double(px)
+                    sumY += Double(py)
+                    sumZ += Double(-z)
                 }
                 u += strideStep
             }
             v += strideStep
         }
 
-        return vertices
+        let count = max(1, vertices.count)
+        let centroid = vertices.isEmpty
+            ? SIMD3<Float>(0, 0, -0.4)
+            : SIMD3<Float>(Float(sumX / Double(count)),
+                           Float(sumY / Double(count)),
+                           Float(sumZ / Double(count)))
+        return PointCloudFrame(vertices: vertices, centroid: centroid)
     }
 
     nonisolated static func depthPseudoColor(t: Float) -> SIMD4<Float> {
@@ -731,11 +756,11 @@ extension TrueDepthCaptureManager: AVCaptureDepthDataOutputDelegate {
         guard PointCloudThrottle.shared.allow(hz: PointCloudSettings.maxRebuildHz) else { return }
 
         let config = PointCloudConfig.shared.current()
-        let pts = TrueDepthCaptureManager.makePointCloud(from: depthData,
-                                                        strideStep: config.stride,
-                                                        useColor: config.useColor,
-                                                        minZ: config.minZ,
-                                                        maxZ: config.maxZ)
+        let frame = TrueDepthCaptureManager.makePointCloud(from: depthData,
+                                                           strideStep: config.stride,
+                                                           useColor: config.useColor,
+                                                           minZ: config.minZ,
+                                                           maxZ: config.maxZ)
 
         let width = CVPixelBufferGetWidth(depthData.depthDataMap)
         let height = CVPixelBufferGetHeight(depthData.depthDataMap)
@@ -743,8 +768,9 @@ extension TrueDepthCaptureManager: AVCaptureDepthDataOutputDelegate {
         let total = width * height
 
         Task { @MainActor in
-            self.pointCloudRenderer.updatePoints(pts)
-            self.livePointCount = pts.count
+            self.pointCloudRenderer.updatePoints(frame.vertices, centroid: frame.centroid)
+            let value = frame.vertices.count
+            if self.livePointCount != value { self.livePointCount = value }
             if self.depthFrameLabel != label { self.depthFrameLabel = label }
             if self.depthPixelTotal != total { self.depthPixelTotal = total }
         }
