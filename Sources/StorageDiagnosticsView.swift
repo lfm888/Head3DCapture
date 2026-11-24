@@ -53,7 +53,7 @@ struct StorageDiagnosticsView: View {
                                 Text(file.name).font(.caption.monospaced())
                                 Spacer()
                                 Text(file.displaySize).font(.caption.monospaced())
-                                    .foregroundStyle(file.bytes > 0 ? .secondary : .red)
+                                    .foregroundStyle(file.bytes > 0 ? Color.secondary : Color.red)
                             }
                         }
                     }
