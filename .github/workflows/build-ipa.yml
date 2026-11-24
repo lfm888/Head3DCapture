@@ -41,6 +41,7 @@ jobs:
                   INFOPLIST_FILE: Info.plist
                   SWIFT_VERSION: "5.0"
                   TARGETED_DEVICE_FAMILY: "1"
+                  ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
                   GENERATE_INFOPLIST_FILE: NO
                   CODE_SIGN_IDENTITY: ""
                   CODE_SIGNING_REQUIRED: NO
@@ -87,6 +88,9 @@ jobs:
           test -d "$APP_PATH"
           /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$APP_PATH/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$APP_PATH/Info.plist"
+          test -f "$APP_PATH/Assets.car" && echo "Assets.car present"
+          strings "$APP_PATH/Assets.car" | grep -c "AppIcon" || true
           rm -rf Payload Head3DCapture.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/

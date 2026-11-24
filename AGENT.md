@@ -22,11 +22,16 @@ Head3DCapture/
 │   └── workflows/
 │       └── build-ipa.yml
 ├── scripts/
-│   └── fetch-ipa.mjs        # 触发/等待 CI 并把 Head3DCapture.ipa 下载到 ./artifacts/
+│   ├── fetch-ipa.mjs        # 触发/等待 CI 并把 Head3DCapture.ipa 下载到 ./artifacts/
+│   └── make-appicon.ps1     # 由 docs/logo.jpg 生成 AppIcon 全尺寸 PNG（Windows / System.Drawing）
+├── docs/
+│   └── logo.jpg             # 封面图源文件（原始素材，勿删）
 └── Sources/
     ├── Head3DCaptureApp.swift
     ├── TrueDepthCaptureManager.swift
-    └── PointCloudMetalView.swift
+    ├── PointCloudMetalView.swift
+    └── Assets.xcassets/
+        └── AppIcon.appiconset/   # 由 scripts/make-appicon.ps1 生成，已入库
 ```
 
 ---
@@ -42,6 +47,7 @@ When asked to modify, inspect, or prepare this project for GitHub Actions compil
 3. **GitHub Actions CI/CD**:
    - The workflow `.github/workflows/build-ipa.yml` runs on `macos-15`, uses `xcodegen` to generate `Head3DCapture.xcodeproj` from an inline `project.yml`, builds an unsigned `.app` (`CODE_SIGN_IDENTITY=""`, `CODE_SIGNING_REQUIRED=NO`, `CODE_SIGNING_ALLOWED=NO`), packages it into `Head3DCapture.ipa` inside `Payload/`, and uploads `Head3DCapture-IPA` as a build artifact.
    - **Never declare an `info:` block in `project.yml`** — xcodegen would overwrite the hand-written `Info.plist` and drop `NSCameraUsageDescription` / `UIFileSharingEnabled` (camera permission crash). The workflow only sets `INFOPLIST_FILE: Info.plist` and `GENERATE_INFOPLIST_FILE: NO`, then asserts the keys with `PlistBuddy` before zipping.
+   - **App icon**: `Sources/Assets.xcassets/AppIcon.appiconset` is committed, `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon`, and `Info.plist` carries `CFBundleIconName`. If `docs/logo.jpg` changes, regenerate with `powershell -NoProfile -File scripts/make-appicon.ps1` (must stay square + **opaque** PNG; actool rejects alpha). The workflow asserts `Assets.car` and `CFBundleIconName` exist before packaging.
    - If adding new `.swift` files under `Sources/`, `xcodegen` automatically picks them up because `sources: - path: Sources` is configured.
    - If adding new Apple system frameworks, add `- sdk: <Framework>.framework` under `targets.Head3DCapture.dependencies` in `.github/workflows/build-ipa.yml`.
 
