@@ -1,0 +1,92 @@
+name: Build Unsigned iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: |
+          cat << 'EOF' > project.yml
+          name: Head3DCapture
+          options:
+            bundleIdPrefix: com.head3d
+            createIntermediateGroups: true
+          targets:
+            Head3DCapture:
+              type: application
+              platform: iOS
+              deploymentTarget: "16.0"
+              sources:
+                - path: Sources
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.head3d.capture
+                  INFOPLIST_FILE: Info.plist
+                  SWIFT_VERSION: "5.0"
+                  TARGETED_DEVICE_FAMILY: "1"
+                  GENERATE_INFOPLIST_FILE: NO
+                  CODE_SIGN_IDENTITY: ""
+                  CODE_SIGNING_REQUIRED: NO
+                  CODE_SIGNING_ALLOWED: NO
+                  DEVELOPMENT_TEAM: ""
+              dependencies:
+                - sdk: Metal.framework
+                - sdk: MetalKit.framework
+          EOF
+          xcodegen generate
+          # Keep the hand-written Info.plist (camera usage + file sharing) intact.
+          git diff --stat -- Info.plist || true
+
+      - name: Build .app (Unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Head3DCapture.xcodeproj \
+            -scheme Head3DCapture \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS=arm64 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tail -n 60
+
+      - name: Package into IPA
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/Head3DCapture.app"
+          test -d "$APP_PATH"
+          /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" "$APP_PATH/Info.plist"
+          rm -rf Payload Head3DCapture.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry Head3DCapture.ipa Payload
+          ls -lh Head3DCapture.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Head3DCapture-IPA
+          path: Head3DCapture.ipa
+          if-no-files-found: error
+          retention-days: 30
