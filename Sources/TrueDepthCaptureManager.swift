@@ -179,6 +179,20 @@ struct PointCloudFrame {
     static let empty = PointCloudFrame(vertices: [], centroid: SIMD3<Float>(0, 0, -0.4))
 }
 
+/** 一次深度图的统计信息（用于区分“本来就很稀” vs “被距离带裁掉了”）。 */
+struct DepthStats {
+    var total = 0
+    var valid = 0
+    var minValue: Float = .nan
+    var maxValue: Float = .nan
+
+    var validRatio: Double { total > 0 ? Double(valid) / Double(total) : 0 }
+
+    var shortDescription: String {
+        String(format: "%d/%d (%.1f%%)", valid, total, validRatio * 100)
+    }
+}
+
 /// 限制点云重建频率。
 final class PointCloudThrottle {
     static let shared = PointCloudThrottle()
@@ -590,6 +604,40 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         return output
     }
 
+    /// 统计一个 Float32 单通道缓冲里的有效像素数（有限且 > 0）与值域。
+    nonisolated static func depthStatistics(_ buffer: CVPixelBuffer) -> DepthStats {
+        var stats = DepthStats()
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        stats.total = width * height
+
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return stats }
+
+        let stride = CVPixelBufferGetBytesPerRow(buffer) / MemoryLayout<Float32>.size
+        let floats = base.assumingMemoryBound(to: Float32.self)
+        var minValue = Float.infinity
+        var maxValue = -Float.infinity
+        var count = 0
+        for row in 0..<height {
+            let rowPtr = floats + row * stride
+            for column in 0..<width {
+                let value = rowPtr[column]
+                guard value.isFinite, value > 0 else { continue }
+                count += 1
+                if value < minValue { minValue = value }
+                if value > maxValue { maxValue = value }
+            }
+        }
+        stats.valid = count
+        if count > 0 {
+            stats.minValue = minValue
+            stats.maxValue = maxValue
+        }
+        return stats
+    }
+
     // MARK: - 额外同步目录（书签）
 
     static let outputBookmarkKey = "com.head3d.outputFolderBookmark"
@@ -630,8 +678,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         }
     }
 
-    /// 把刚保存的目录复制到用户指定的文件夹，返回目标描述（用于状态栏）。
-    private func mirrorToOutputFolder(_ directory: URL, files: [StoredFile]) -> String? {
+    /// 把刚保存的目录复制到用户指定的文件夹，返回目标描述（用于状态栏）。    private func mirrorToOutputFolder(_ directory: URL, files: [StoredFile]) -> String? {
         guard let data = UserDefaults.standard.data(forKey: Self.outputBookmarkKey) else { return nil }
         var stale = false
         guard let folder = try? URL(resolvingBookmarkData: data,
@@ -727,7 +774,17 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 "depth_min_m": Double(bandMin),
                 "depth_max_m": Double(bandMax),
                 "depth_band_applied": maskedBuffer != nil,
-                "depth_invalid_value": "nan"
+                "depth_invalid_value": "nan",
+                // 保存后 TIFF 里的有效像素（有限且 > 0）与值域
+                "depth_valid_pixels": savedStats.valid,
+                "depth_valid_ratio": savedStats.validRatio,
+                "depth_saved_min_m": Double(savedStats.minValue),
+                "depth_saved_max_m": Double(savedStats.maxValue),
+                // 裁剪前的原始深度统计（用来区分“本来就很稀” vs “被距离带裁掉”）
+                "depth_raw_valid_pixels": rawStats.valid,
+                "depth_raw_ratio": rawStats.validRatio,
+                "depth_raw_min_m": Double(rawStats.minValue),
+                "depth_raw_max_m": Double(rawStats.maxValue)
             ]
 
             if let dims = savedRGBDimensions {
@@ -788,7 +845,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
 
             // 回读校验：确认文件真的落在磁盘上且非空。
             let stored = StoredFile.describe(targetDir, names: ["rgb.jpg", "depth.tiff", "intrinsics.json"])
-            let totalBytes = stored.reduce(Int64(0)) { $0 + $1.bytes }
+            _ = stored.reduce(Int64(0)) { $0 + $1.bytes }
             let verified = stored.allSatisfy { $0.bytes > 0 }
             let mirrored = mirrorToOutputFolder(targetDir, files: stored)
 
@@ -798,7 +855,12 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 self.lastCaptureURL = targetDir
                 self.lastStoredFiles = stored
                 if verified {
-                    var msg = "已保存 · \(depthWidth)×\(depthHeight) · \(StoredFile.format(totalBytes))"
+                    var msg = "已保存 · \(depthWidth)×\(depthHeight) · 深度有效 \(savedStats.shortDescription)"
+                    if savedStats.validRatio < 0.05 {
+                        msg += rawStats.validRatio > 0.2
+                            ? " · 距离带裁掉了大部分（原始 \(rawStats.shortDescription)）"
+                            : " · 深度本身很稀（原始 \(rawStats.shortDescription)，可能贴太近/太远）"
+                    }
                     if let mirrored { msg += " · 已同步\(mirrored)" }
                     self.statusMessage = msg
                 } else {
