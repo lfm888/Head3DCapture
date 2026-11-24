@@ -678,8 +678,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         }
     }
 
-    /// 把刚保存的目录复制到用户指定的文件夹，返回目标描述（用于状态栏）。
-    private func mirrorToOutputFolder(_ directory: URL, files: [StoredFile]) -> String? {
+    /// 把刚保存的目录复制到用户指定的文件夹，返回目标描述（用于状态栏）。    private func mirrorToOutputFolder(_ directory: URL, files: [StoredFile]) -> String? {
         guard let data = UserDefaults.standard.data(forKey: Self.outputBookmarkKey) else { return nil }
         var stale = false
         guard let folder = try? URL(resolvingBookmarkData: data,
