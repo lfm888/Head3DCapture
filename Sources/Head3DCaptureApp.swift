@@ -84,6 +84,30 @@ struct TrueDepthCaptureView: View {
             }
             .frame(maxHeight: .infinity)
 
+            // 显示模式：彩色深度点云 / 深度伪彩
+            HStack(spacing: 10) {
+                Picker("显示模式", selection: $manager.showColorPointCloud) {
+                    Text("彩色深度点云").tag(true)
+                    Text("深度伪彩").tag(false)
+                }
+                .pickerStyle(.segmented)
+
+                Button {
+                    if let url = manager.lastCaptureURL { FileExporter.export([url]) }
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.blue.opacity(manager.lastCaptureURL == nil ? 0.25 : 0.9))
+                        .foregroundColor(.white)
+                        .cornerRadius(7)
+                }
+                .disabled(manager.lastCaptureURL == nil)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+
             // 底部快门与计数栏
             HStack {
                 Text("已存帧数: \(manager.captureCount)")
@@ -115,9 +139,29 @@ struct TrueDepthCaptureView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
             .background(Color.black)
+
+            Text("保存位置：「文件」App › 我的 iPhone › Head3D采集 › Head3D")
+                .font(.caption2)
+                .foregroundColor(.white.opacity(0.6))
+                .padding(.bottom, 6)
+                .frame(maxWidth: .infinity)
+                .background(Color.black)
         }
         .navigationTitle("iPhone深度数据采集模块")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// 用系统文件选择器把捕获目录导出/拷贝到 iCloud Drive 或「我的 iPhone」任意位置。
+/// （iOS 没有给 App 写任意公共目录的权限，这是唯一稳定的公开做法。）
+enum FileExporter {
+    static func export(_ urls: [URL]) {
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              var top = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
+        while let presented = top.presentedViewController { top = presented }
+        let picker = UIDocumentPickerViewController(forExporting: urls, asCopy: true)
+        picker.shouldShowFileExtensions = true
+        top.present(picker, animated: true)
     }
 }
 

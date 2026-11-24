@@ -1,23 +1,61 @@
 import AVFoundation
 import CoreImage
+import ImageIO
 import SwiftUI
 import UIKit
+
+/// Thread-safe holder for the most recent RGB video frame, used to colour the live point cloud.
+/// Retaining a single `CVPixelBuffer` is zero-copy and enough — older frames are dropped
+/// (`alwaysDiscardsLateVideoFrames`).
+final class LatestVideoFrame {
+    static let shared = LatestVideoFrame()
+
+    private let lock = NSLock()
+    private var buffer: CVPixelBuffer?
+
+    func update(_ pixelBuffer: CVPixelBuffer) {
+        lock.lock()
+        buffer = pixelBuffer
+        lock.unlock()
+    }
+
+    func peek() -> CVPixelBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer
+    }
+
+    func clear() {
+        lock.lock()
+        buffer = nil
+        lock.unlock()
+    }
+}
 
 @MainActor
 class TrueDepthCaptureManager: NSObject, ObservableObject {
     @Published var isSessionRunning = false
     @Published var statusMessage = "就绪"
     @Published var lastSavedFolder: String?
+    @Published var lastCaptureURL: URL?
     @Published var captureCount = 0
     @Published var livePointCount = 0
+    /// true = 彩色深度点云（用前置 RGB 给每个深度点上色）；false = 深度伪彩。
+    @Published var showColorPointCloud = true
 
     let session = AVCaptureSession()
     let pointCloudRenderer = PointCloudRenderer()
 
+    /// 点云可视化相对传感器原始朝向的旋转。TrueDepth 深度图是横向(landscape)输出的，
+    /// 顺时针转 90° 后与竖屏预览画面一致。数据文件不做旋转（保持传感器原始朝向）。
+    static let pointCloudRotationDegrees: Float = 90
+
     private let sessionQueue = DispatchQueue(label: "com.head3d.capture.session")
     private let depthStreamQueue = DispatchQueue(label: "com.head3d.depth.stream")
+    private let videoStreamQueue = DispatchQueue(label: "com.head3d.video.stream")
     private let photoOutput = AVCapturePhotoOutput()
     private let depthDataOutput = AVCaptureDepthDataOutput()
+    private let videoDataOutput = AVCaptureVideoDataOutput()
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     override init() {
@@ -72,6 +110,18 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             }
         }
 
+        // Live RGB frames: only used to colour the point cloud. They need no rotation because
+        // the video stream and the depth stream are both delivered in the sensor's own
+        // orientation (iOS already registers TrueDepth depth to this RGB camera).
+        if session.canAddOutput(videoDataOutput) {
+            videoDataOutput.alwaysDiscardsLateVideoFrames = true
+            videoDataOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+            ]
+            videoDataOutput.setSampleBufferDelegate(self, callbackQueue: videoStreamQueue)
+            session.addOutput(videoDataOutput)
+        }
+
         if photoOutput.isDepthDataDeliverySupported {
             photoOutput.isDepthDataDeliveryEnabled = true
         } else {
@@ -97,6 +147,12 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         }
     }
 
+    func stopSession() {
+        sessionQueue.async {
+            if self.session.isRunning { self.session.stopRunning() }
+        }
+    }
+
     func captureFrame() {
         guard isSessionRunning else { return }
         statusMessage = "正在采集 RGB + 深度图..."
@@ -114,7 +170,9 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
-    private func buildPointCloud(from depthData: AVDepthData, strideStep: Int = 3) -> [PointVertex] {
+    // MARK: - Point cloud
+
+    private func buildPointCloud(from depthData: AVDepthData, strideStep: Int = 3, useColor: Bool) -> [PointVertex] {
         let floatDepthData = depthData.depthDataType == kCVPixelFormatType_DepthFloat32
             ? depthData
             : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
@@ -144,6 +202,30 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             cy = K.columns.2.y * scaleY
         }
 
+        // Optional RGB lookup table for colouring.
+        var rgbBuffer: CVPixelBuffer?
+        if useColor { rgbBuffer = LatestVideoFrame.shared.peek() }
+        if let rgb = rgbBuffer { CVPixelBufferLockBaseAddress(rgb, .readOnly) }
+        defer { if let rgb = rgbBuffer { CVPixelBufferUnlockBaseAddress(rgb, .readOnly) } }
+
+        let rgbBase = rgbBuffer.flatMap { CVPixelBufferGetBaseAddress($0) }
+        let rgbW = rgbBuffer.map { CVPixelBufferGetWidth($0) } ?? 0
+        let rgbH = rgbBuffer.map { CVPixelBufferGetHeight($0) } ?? 0
+        let rgbBPR = rgbBuffer.map { CVPixelBufferGetBytesPerRow($0) } ?? 0
+        // Depth and RGB share the same optical axis and horizontal FOV; RGB may be a wider
+        // aspect (16:9) crop of the same sensor, so map by width ratio and centre it vertically.
+        let colorScale = rgbW > 0 ? Float(rgbW) / Float(width) : 0
+        let halfHeight = Float(height) * 0.5
+        let halfRgbHeight = Float(rgbH) * 0.5
+        let canSampleColor = rgbBase != nil && rgbW > 0 && rgbH > 0
+
+        // Clockwise rotation of the visualization (see pointCloudRotationDegrees).
+        let theta = TrueDepthCaptureManager.pointCloudRotationDegrees * Float.pi / 180.0
+        let cosT = cos(theta)
+        let sinT = sin(theta)
+        // Screen coords: x right, y up. Clockwise by θ: (x, y) -> (x·cosθ + y·sinθ, -x·sinθ + y·cosθ).
+        let rotA = cosT, rotB = sinT, rotC = -sinT, rotD = cosT
+
         var vertices: [PointVertex] = []
         vertices.reserveCapacity((width / strideStep) * (height / strideStep))
 
@@ -159,9 +241,27 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 if z.isFinite && z >= minZ && z <= maxZ {
                     let x = (Float(u) - cx) * z / fx
                     let y = -((Float(v) - cy) * z / fy)
-                    let norm = max(0.0, min(1.0, (z - minZ) / (maxZ - minZ)))
-                    let color = depthPseudoColor(t: norm)
-                    vertices.append(PointVertex(position: SIMD3<Float>(x, y, -z), color: color))
+
+                    let px = x * rotA + y * rotB
+                    let py = x * rotC + y * rotD
+
+                    var color = depthPseudoColor(t: max(0.0, min(1.0, (z - minZ) / (maxZ - minZ))))
+                    if canSampleColor, let rgbBase {
+                        let ru = Int(Float(u) * colorScale)
+                        let rv = Int((Float(v) - halfHeight) * colorScale + halfRgbHeight)
+                        if ru >= 0, ru < rgbW, rv >= 0, rv < rgbH {
+                            let p = rgbBase
+                                .advanced(by: rv * rgbBPR + ru * 4)
+                                .assumingMemoryBound(to: UInt8.self)
+                            // kCVPixelFormatType_32BGRA
+                            color = SIMD4<Float>(Float(p[2]) / 255.0,
+                                                 Float(p[1]) / 255.0,
+                                                 Float(p[0]) / 255.0,
+                                                 1.0)
+                        }
+                    }
+
+                    vertices.append(PointVertex(position: SIMD3<Float>(px, py, -z), color: color))
                 }
                 u += strideStep
             }
@@ -176,6 +276,19 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         let g = max(0.0, min(1.0, 1.5 - abs(4.0 * t - 2.0)))
         let b = max(0.0, min(1.0, 1.5 - abs(4.0 * t - 1.0)))
         return SIMD4<Float>(r, g, b, 1.0)
+    }
+
+    // MARK: - Saving
+
+    /// 保存根目录：`Documents/Head3D/<时间戳>/`。
+    /// `Documents` 已通过 `UIFileSharingEnabled` 暴露给「文件」App（我的 iPhone › Head3D采集）。
+    static func capturesRootDirectory() -> URL? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let root = docs.appendingPathComponent("Head3D", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: root.path) {
+            try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        }
+        return root
     }
 
     private func saveCaptureData(rgbData: Data, depthData: AVDepthData) {
@@ -204,10 +317,10 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
-        let folderName = "Head3D_\(formatter.string(from: Date()))"
+        let folderName = formatter.string(from: Date())
 
-        guard let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
-        let targetDir = docsURL.appendingPathComponent(folderName, isDirectory: true)
+        guard let root = TrueDepthCaptureManager.capturesRootDirectory() else { return }
+        let targetDir = root.appendingPathComponent(folderName, isDirectory: true)
 
         do {
             try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
@@ -218,12 +331,33 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             let depthURL = targetDir.appendingPathComponent("depth.tiff")
             try tiffData.write(to: depthURL)
 
+            let savedRGBDimensions: (Int, Int)? = {
+                guard let source = CGImageSourceCreateWithData(rgbData as CFData, nil),
+                      let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                      let w = props[kCGImagePropertyPixelWidth] as? Int,
+                      let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+                return (w, h)
+            }()
+
+            let rgbFrame = LatestVideoFrame.shared.peek()
             var intrinsicsDict: [String: Any] = [
                 "depth_width": depthWidth,
                 "depth_height": depthHeight,
                 "depth_accuracy": convertedDepth.depthDataAccuracy == .absolute ? "absolute" : "relative",
-                "depth_quality": convertedDepth.depthDataQuality == .high ? "high" : "low"
+                "depth_quality": convertedDepth.depthDataQuality == .high ? "high" : "low",
+                "saved_folder": "Head3D/\(folderName)"
             ]
+
+            if let dims = savedRGBDimensions {
+                intrinsicsDict["rgb_width"] = dims.0
+                intrinsicsDict["rgb_height"] = dims.1
+            }
+            if let frame = rgbFrame {
+                // Resolution of the live RGB stream used for colour sampling (not rgb.jpg).
+                intrinsicsDict["color_sampling_width"] = CVPixelBufferGetWidth(frame)
+                intrinsicsDict["color_sampling_height"] = CVPixelBufferGetHeight(frame)
+            }
+            intrinsicsDict["point_cloud_rotation_deg"] = Double(TrueDepthCaptureManager.pointCloudRotationDegrees)
 
             if let calib = convertedDepth.cameraCalibrationData {
                 let K = calib.intrinsicMatrix
@@ -243,6 +377,16 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 intrinsicsDict["reference_width"] = refDim.width
                 intrinsicsDict["reference_height"] = refDim.height
                 intrinsicsDict["pixel_size_mm"] = calib.pixelSize
+
+                // iOS 唯一公开的 RGB↔深度外参：AVCameraCalibrationData.extrinsicMatrix，
+                // 语义是「深度相机 → 参考相机(RGB)」的 3x4 刚体变换 [R|t]（行主序导出）。
+                // TrueDepth 的深度图已由系统配准到 RGB，实测为单位矩阵(即忽略也无损)。
+                let E = calib.extrinsicMatrix
+                intrinsicsDict["extrinsic_depth_to_rgb_3x4"] = [
+                    [E.columns.0.x, E.columns.1.x, E.columns.2.x, E.columns.3.x],
+                    [E.columns.0.y, E.columns.1.y, E.columns.2.y, E.columns.3.y],
+                    [E.columns.0.z, E.columns.1.z, E.columns.2.z, E.columns.3.z]
+                ]
             }
 
             let jsonData = try JSONSerialization.data(withJSONObject: intrinsicsDict, options: .prettyPrinted)
@@ -251,7 +395,8 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             Task { @MainActor in
                 self.captureCount += 1
                 self.lastSavedFolder = folderName
-                self.statusMessage = "已保存: \(folderName) (\(depthWidth)x\(depthHeight))"
+                self.lastCaptureURL = targetDir
+                self.statusMessage = "已保存: Head3D/\(folderName) (\(depthWidth)x\(depthHeight))"
             }
         } catch {
             Task { @MainActor in
@@ -267,10 +412,21 @@ extension TrueDepthCaptureManager: AVCaptureDepthDataOutputDelegate {
                                      timestamp: CMTime,
                                      connection: AVCaptureConnection) {
         Task { @MainActor in
-            let pts = self.buildPointCloud(from: depthData, strideStep: 3)
+            let pts = self.buildPointCloud(from: depthData,
+                                           strideStep: 3,
+                                           useColor: self.showColorPointCloud)
             self.pointCloudRenderer.updatePoints(pts)
             self.livePointCount = pts.count
         }
+    }
+}
+
+extension TrueDepthCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    nonisolated func captureOutput(_ output: AVCaptureOutput,
+                                   didOutput sampleBuffer: CMSampleBuffer,
+                                   from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        LatestVideoFrame.shared.update(pixelBuffer)
     }
 }
 
