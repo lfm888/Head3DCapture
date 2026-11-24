@@ -4,6 +4,7 @@ import ImageIO
 import simd
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Thread-safe holder for the most recent RGB video frame, used to colour the live point cloud.
 /// Retaining a single `CVPixelBuffer` is zero-copy and enough — older frames are dropped
@@ -114,6 +115,60 @@ enum AppPaths {
     }
 }
 
+/** 一次采集写盘后的单个文件（用于界面校验与诊断）。 */
+struct StoredFile: Identifiable, Hashable {
+    let name: String
+    let bytes: Int64
+    var id: String { name }
+
+    var displaySize: String { StoredFile.format(bytes) }
+
+    static func format(_ bytes: Int64) -> String {
+        let kb = Double(bytes) / 1024.0
+        if kb < 1024 { return String(format: "%.1f KB", kb) }
+        return String(format: "%.2f MB", kb / 1024.0)
+    }
+
+    static func describe(_ directory: URL, names: [String]) -> [StoredFile] {
+        names.map { name in
+            let url = directory.appendingPathComponent(name)
+            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            return StoredFile(name: name, bytes: size)
+        }
+    }
+}
+
+/// 让用户挑一个「同步输出目录」（iCloud Drive / 我的 iPhone 任意位置），记下安全作用域书签，
+/// 之后每次保存都自动在同一位置复制一份——完全不依赖「文件」App 是否展示 App 沙盒。
+final class FolderPickerDelegate: NSObject, UIDocumentPickerDelegate {
+    private let onPick: (URL) -> Void
+
+    init(onPick: @escaping (URL) -> Void) {
+        self.onPick = onPick
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        if let url = urls.first { onPick(url) }
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {}
+}
+
+/// 弹出系统 UI（文档选择器等）的辅助工具。
+enum FilePresenter {
+    static func topViewController() -> UIViewController? {
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              var top = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return nil }
+        while let presented = top.presentedViewController { top = presented }
+        return top
+    }
+
+    static func present(_ viewController: UIViewController) {
+        topViewController()?.present(viewController, animated: true)
+    }
+}
+
 /// 限制点云重建频率。
 final class PointCloudThrottle {
     static let shared = PointCloudThrottle()
@@ -142,6 +197,10 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
     @Published var lastCaptureURL: URL?
     @Published var captureCount = 0
     @Published var livePointCount = 0
+    /// 最近一次保存写盘后实际看到的文件与大小（界面用来验证「真的写进去了」）。
+    @Published var lastStoredFiles: [StoredFile] = []
+    /// 用户通过文档选择器指定的额外同步目录（书签持久化）。
+    @Published var outputFolderName: String?
     /// true = 彩色深度点云（用前置 RGB 给每个深度点上色）；false = 深度伪彩。
     @Published var showColorPointCloud = true {
         didSet { syncPointCloudConfig() }
@@ -198,6 +257,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        outputFolderName = UserDefaults.standard.string(forKey: Self.outputFolderNameKey)
         syncPointCloudConfig()
         checkPermissionsAndConfigure()
     }
@@ -454,6 +514,75 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         return root
     }
 
+    // MARK: - 额外同步目录（书签）
+
+    static let outputBookmarkKey = "com.head3d.outputFolderBookmark"
+    static let outputFolderNameKey = "com.head3d.outputFolderName"
+
+    private var folderPicker: FolderPickerDelegate?
+
+    /// 让用户挑一个普通文件夹（iCloud Drive / 我的 iPhone 任意位置），以后每次保存自动同步一份。
+    func chooseOutputFolder() {
+        let picker = UIDocumentPickerViewController(forOpeningContentProviders: [.folder], asCopy: false)
+        picker.allowsMultipleSelection = false
+        let delegate = FolderPickerDelegate { [weak self] url in
+            Task { @MainActor in self?.storeOutputFolder(url) }
+        }
+        folderPicker = delegate
+        picker.delegate = delegate
+        FilePresenter.present(picker)
+    }
+
+    func clearOutputFolder() {
+        UserDefaults.standard.removeObject(forKey: Self.outputBookmarkKey)
+        UserDefaults.standard.removeObject(forKey: Self.outputFolderNameKey)
+        outputFolderName = nil
+        statusMessage = "已取消同步目录"
+    }
+
+    private func storeOutputFolder(_ url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(data, forKey: Self.outputBookmarkKey)
+            UserDefaults.standard.set(url.lastPathComponent, forKey: Self.outputFolderNameKey)
+            outputFolderName = url.lastPathComponent
+            statusMessage = "已设置同步目录: \(url.lastPathComponent)"
+        } catch {
+            statusMessage = "设置同步目录失败: \(error.localizedDescription)"
+        }
+    }
+
+    /// 把刚保存的目录复制到用户指定的文件夹，返回目标描述（用于状态栏）。
+    private func mirrorToOutputFolder(_ directory: URL, files: [StoredFile]) -> String? {
+        guard let data = UserDefaults.standard.data(forKey: Self.outputBookmarkKey) else { return nil }
+        var stale = false
+        guard let folder = try? URL(resolvingBookmarkData: data,
+                                   options: [],
+                                   relativeTo: nil,
+                                   bookmarkDataIsStale: &stale) else { return nil }
+
+        let scoped = folder.startAccessingSecurityScopedResource()
+        defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+
+        let dest = folder.appendingPathComponent(directory.lastPathComponent, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+            for file in files where file.bytes > 0 {
+                let src = directory.appendingPathComponent(file.name)
+                let dst = dest.appendingPathComponent(file.name)
+                if FileManager.default.fileExists(atPath: dst.path) {
+                    try FileManager.default.removeItem(at: dst)
+                }
+                try FileManager.default.copyItem(at: src, to: dst)
+            }
+            return " \(folder.lastPathComponent)/\(dest.lastPathComponent)"
+        } catch {
+            return nil
+        }
+    }
+
     private func saveCaptureData(rgbData: Data, depthData: AVDepthData) {
         let convertedDepth: AVDepthData
         if depthData.depthDataType != kCVPixelFormatType_DepthFloat32 {
@@ -567,11 +696,24 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             let jsonData = try JSONSerialization.data(withJSONObject: intrinsicsDict, options: .prettyPrinted)
             try jsonData.write(to: targetDir.appendingPathComponent("intrinsics.json"))
 
+            // 回读校验：确认文件真的落在磁盘上且非空。
+            let stored = StoredFile.describe(targetDir, names: ["rgb.jpg", "depth.tiff", "intrinsics.json"])
+            let totalBytes = stored.reduce(Int64(0)) { $0 + $1.bytes }
+            let verified = stored.allSatisfy { $0.bytes > 0 }
+            let mirrored = mirrorToOutputFolder(targetDir, files: stored)
+
             Task { @MainActor in
                 self.captureCount += 1
                 self.lastSavedFolder = folderName
                 self.lastCaptureURL = targetDir
-                self.statusMessage = "已保存 · \(depthWidth)×\(depthHeight)"
+                self.lastStoredFiles = stored
+                if verified {
+                    var msg = "已保存 · \(depthWidth)×\(depthHeight) · \(StoredFile.format(totalBytes))"
+                    if let mirrored { msg += " · 已同步\(mirrored)" }
+                    self.statusMessage = msg
+                } else {
+                    self.statusMessage = "保存校验失败：有文件缺失或为空"
+                }
             }
         } catch {
             Task { @MainActor in

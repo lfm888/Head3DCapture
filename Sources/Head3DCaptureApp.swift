@@ -39,6 +39,7 @@ struct HomeView: View {
 
 struct TrueDepthCaptureView: View {
     @StateObject private var manager = TrueDepthCaptureManager()
+    @State private var showDiagnostics = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -102,6 +103,18 @@ struct TrueDepthCaptureView: View {
                 Spacer(minLength: 0)
 
                 Button {
+                    showDiagnostics = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .foregroundColor(.white)
+                        .background(Color.white.opacity(0.18))
+                        .cornerRadius(7)
+                }
+
+                Button {
                     if let url = manager.lastCaptureURL { FileExporter.export([url]) }
                 } label: {
                     Label("导出", systemImage: "square.and.arrow.up")
@@ -163,7 +176,7 @@ struct TrueDepthCaptureView: View {
 
                 Spacer()
 
-                Text("0.15m~1.2m")
+                Text(String(format: "%.2f~%.2fm", manager.nearZ, manager.farZ))
                     .font(.caption.monospaced())
                     .foregroundColor(.white.opacity(0.7))
             }
@@ -171,16 +184,26 @@ struct TrueDepthCaptureView: View {
             .padding(.vertical, 12)
             .background(Color.black)
 
-            Text("保存位置：\(AppPaths.filesAppRoot)")
-                .font(.caption2)
-                .foregroundColor(.white.opacity(0.6))
-                .multilineTextAlignment(.center)
-                .padding(.bottom, 6)
-                .frame(maxWidth: .infinity)
-                .background(Color.black)
+            VStack(spacing: 1) {
+                Text("保存位置：\(AppPaths.filesAppRoot)")
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.6))
+                    .multilineTextAlignment(.center)
+                Text(manager.outputFolderName.map { "已同步到: \($0)（每次保存自动复制）" }
+                     ?? "看不到就点 ⓘ 诊断 / 导出，或在诊断里设「同步目录」")
+                    .font(.caption2)
+                    .foregroundColor(.green.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.bottom, 6)
+            .frame(maxWidth: .infinity)
+            .background(Color.black)
         }
         .navigationTitle("iPhone深度数据采集模块")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showDiagnostics) {
+            StorageDiagnosticsView(manager: manager)
+        }
     }
 
     private var strideBinding: Binding<Double> {
@@ -212,12 +235,9 @@ struct TrueDepthCaptureView: View {
 /// （iOS 没有给 App 写任意公共目录的权限，这是唯一稳定的公开做法。）
 enum FileExporter {
     static func export(_ urls: [URL]) {
-        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-              var top = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
-        while let presented = top.presentedViewController { top = presented }
         let picker = UIDocumentPickerViewController(forExporting: urls, asCopy: true)
         picker.shouldShowFileExtensions = true
-        top.present(picker, animated: true)
+        FilePresenter.present(picker)
     }
 }
 

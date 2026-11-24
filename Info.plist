@@ -28,6 +28,8 @@
     <true/>
     <key>LSSupportsOpeningInPlace</key>
     <true/>
+    <key>UISupportsDocumentBrowser</key>
+    <true/>
     <key>UILaunchScreen</key>
     <dict/>
 </dict>
