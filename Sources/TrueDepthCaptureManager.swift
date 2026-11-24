@@ -80,10 +80,6 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
             return
         }
 
-        if photoOutput.isCameraCalibrationDataDeliverySupported {
-            photoOutput.isCameraCalibrationDataDeliveryEnabled = true
-        }
-
         if let depthFormat = device.activeFormat.supportedDepthDataFormats.first(where: {
             CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
         }) {
@@ -110,7 +106,8 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
         settings.embedsDepthDataInPhoto = false
         settings.isDepthDataFiltered = false
 
-        if photoOutput.isCameraCalibrationDataDeliveryEnabled {
+        // Calibration delivery is a per-capture setting; the output only exposes the capability flag.
+        if photoOutput.isCameraCalibrationDataDeliverySupported {
             settings.isCameraCalibrationDataDeliveryEnabled = true
         }
 
