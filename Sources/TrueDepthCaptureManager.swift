@@ -87,6 +87,33 @@ final class PointCloudConfig {
     }
 }
 
+/// 界面里所有「路径」文案的唯一来源，避免同一目录出现三种写法。
+/// 真实位置：App 沙盒 `Documents/Head3D/<时间戳>/`，因为 `UIFileSharingEnabled`，
+/// 在「文件」App 里的等价路径就是 `我的 iPhone/<App 显示名>/Head3D/<时间戳>/`。
+enum AppPaths {
+    static let capturesFolderName = "Head3D"
+
+    /// 从 Info.plist 读取，改 `CFBundleDisplayName` 时文案会跟着变。
+    static var appDisplayName: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? "Head3D采集"
+    }
+
+    /// 「文件」App 中保存根目录的完整人话路径。
+    static var filesAppRoot: String {
+        "「文件」App › 我的 iPhone › \(appDisplayName) › \(capturesFolderName)"
+    }
+
+    /// 单次采集目录在「文件」App 中的路径。
+    static func filesAppPath(folder: String) -> String {
+        "我的 iPhone › \(appDisplayName) › \(capturesFolderName) › \(folder)"
+    }
+
+    /// 沙盒内相对路径（写进 intrinsics.json，给后端用）。
+    static func relativePath(folder: String) -> String {
+        "\(capturesFolderName)/\(folder)"
+    }
+}
+
 /// 限制点云重建频率。
 final class PointCloudThrottle {
     static let shared = PointCloudThrottle()
@@ -420,7 +447,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
     /// `Documents` 已通过 `UIFileSharingEnabled` 暴露给「文件」App（我的 iPhone › Head3D采集）。
     static func capturesRootDirectory() -> URL? {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
-        let root = docs.appendingPathComponent("Head3D", isDirectory: true)
+        let root = docs.appendingPathComponent(AppPaths.capturesFolderName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: root.path) {
             try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         }
@@ -481,7 +508,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 "depth_height": depthHeight,
                 "depth_accuracy": convertedDepth.depthDataAccuracy == .absolute ? "absolute" : "relative",
                 "depth_quality": convertedDepth.depthDataQuality == .high ? "high" : "low",
-                "saved_folder": "Head3D/\(folderName)"
+                "saved_folder": AppPaths.relativePath(folder: folderName)
             ]
 
             if let dims = savedRGBDimensions {
@@ -544,7 +571,7 @@ class TrueDepthCaptureManager: NSObject, ObservableObject {
                 self.captureCount += 1
                 self.lastSavedFolder = folderName
                 self.lastCaptureURL = targetDir
-                self.statusMessage = "已保存: Head3D/\(folderName) (\(depthWidth)x\(depthHeight))"
+                self.statusMessage = "已保存 · \(depthWidth)×\(depthHeight)"
             }
         } catch {
             Task { @MainActor in

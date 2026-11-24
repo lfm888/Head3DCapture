@@ -51,9 +51,12 @@ struct TrueDepthCaptureView: View {
                         .font(.caption.monospaced())
                         .foregroundColor(.white)
                     if let folder = manager.lastSavedFolder {
-                        Text("目录: Documents/\(folder)")
+                        Text("目录: \(AppPaths.filesAppPath(folder: folder))")
                             .font(.caption2.monospaced())
                             .foregroundColor(.green)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.75)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -168,9 +171,10 @@ struct TrueDepthCaptureView: View {
             .padding(.vertical, 12)
             .background(Color.black)
 
-            Text("保存位置：「文件」App › 我的 iPhone › Head3D采集 › Head3D")
+            Text("保存位置：\(AppPaths.filesAppRoot)")
                 .font(.caption2)
                 .foregroundColor(.white.opacity(0.6))
+                .multilineTextAlignment(.center)
                 .padding(.bottom, 6)
                 .frame(maxWidth: .infinity)
                 .background(Color.black)
