@@ -8,7 +8,14 @@ It captures:
 - Scaled camera intrinsics & metadata (`intrinsics.json`)
 - Real-time 3D point cloud visualization rendered via **Metal (`MTKView`)** with pan/pinch/double-tap gestures.
 
-Saved captures are written to `Documents/Head3D/<timestamp>/` (one parent folder so everything is easy to find in the Files app) and exposed via iOS File Sharing (`UIFileSharingEnabled` and `LSSupportsOpeningInPlace` → 文件 App › 我的 iPhone › **Head3D采集** › Head3D). Because iOS gives an app no write access to arbitrary public folders, the UI also has a **导出** button that opens `UIDocumentPickerViewController(forExporting:)` to copy a capture folder anywhere (iCloud Drive / 我的 iPhone …).
+Saved captures are written to `Documents/Head3D/<timestamp>/` (one parent folder so everything is easy to find in the Files app) and exposed via iOS File Sharing (`UIFileSharingEnabled` + `LSSupportsOpeningInPlace` + `UISupportsDocumentBrowser` → 文件 App › 我的 iPhone › **Head3D采集** › Head3D).
+
+**Known platform trap (iOS 18 regression):** many apps report that even with `UIFileSharingEnabled`/`LSSupportsOpeningInPlace` = true, their Documents folder does not show up under 「On My iPhone」 although the files *are* written (they are visible in 设置 › 通用 › iPhone 储存空间 › App › 文稿). Mitigations built into the app:
+   - `UISupportsDocumentBrowser` = true (declares the container as a document store, which the Files app honours when the legacy flag is ignored).
+   - **ⓘ 存储诊断** sheet: prints the runtime Info.plist flags, the absolute sandbox path, a read-back listing with file sizes, a full `Documents` scan, plus 「复制诊断信息」.
+   - **同步目录** (opt-in): pick any folder once via `UIDocumentPickerViewController(forOpeningContentTypes: [.folder])`; the security-scoped bookmark is persisted and every capture is copied there automatically (`mirrorToOutputFolder`), so files always land in a normal, browsable location regardless of sandbox exposure.
+   - **导出** button: one-shot `UIDocumentPickerViewController(forExporting:asCopy:)` copy of the last capture.
+   - Every save is verified by reading file attributes back; a zero/missing file turns the status into `保存校验失败` instead of a fake success.
 
 ---
 
