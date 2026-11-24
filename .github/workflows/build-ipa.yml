@@ -5,9 +5,17 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# 新提交进来时取消上一次排队/运行中的构建，少占 macOS runner 队列
+concurrency:
+  group: ipa-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      XCODEGEN_VERSION: "2.48.0"
 
     steps:
       - name: Checkout repository
@@ -18,11 +26,26 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks | grep -i iphoneos || true
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      # 直接下预编译二进制并缓存，避免 `brew install xcodegen`（含 auto-update）每次都花 1~3 分钟
+      - name: Cache XcodeGen
+        id: xcodegen-cache
+        uses: actions/cache@v4
+        with:
+          path: .xcodegen
+          key: xcodegen-${{ env.XCODEGEN_VERSION }}
+
+      - name: Install XcodeGen (prebuilt)
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .xcodegen
+          curl -sSL -o /tmp/xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          unzip -q /tmp/xcodegen.zip -d .xcodegen
+          chmod +x .xcodegen/xcodegen/bin/xcodegen
 
       - name: Generate Xcode Project
         run: |
+          .xcodegen/xcodegen/bin/xcodegen --version
           cat << 'EOF' > project.yml
           name: Head3DCapture
           options:
@@ -51,7 +74,7 @@ jobs:
                 - sdk: Metal.framework
                 - sdk: MetalKit.framework
           EOF
-          xcodegen generate
+          .xcodegen/xcodegen/bin/xcodegen generate
           # Keep the hand-written Info.plist (camera usage + file sharing) intact.
           git diff --stat -- Info.plist || true
 
